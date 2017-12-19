@@ -24,6 +24,7 @@
     # process an item in a task queue, exit status will determin if it is processed
     # the queue message is passed to the exec command in quotes
     # obviously there are security concerns around doing this, clean your inputs!
+    # data is passed to /command/to/run as "queuename:message"
     > echelon -q work --type=task --exec "/command/to/run"
 
     # peek at work items in a task queue, --type=task is default for a peek
@@ -82,7 +83,7 @@ use Lingua::EN::Inflexion ;
 use constant ECHELON      => "$ENV{HOME}/.echelon" ;
 use constant FIVE_DAYS    => 5 * 24 * 3600 ;
 use constant PEEK_DEFAULT => 10 ;
-use constant EXEC_DEFAULT => 1 ;
+use constant TASK_SLEEP => 10 ;
 
 # -----------------------------------------------------------------------------
 
@@ -110,7 +111,29 @@ sub _simple_action
     } else {
         msg_exit( "No message to push", 1 ) ;
     }
+}
 
+# -----------------------------------------------------------------------------
+sub _exec_action
+{
+    my ( $self, $qname, $record, $params ) = @_ ;
+
+    my $command = "$params->{cmd} '$qname:$record->{data}->{task}'" ;
+    verbose("running $command") ;
+
+    my ($resp) = execute_cmd(
+        command => $command,
+        timeout => 10,
+        # child_stdin => $content
+    ) ;
+    if ( $resp->{exit_code} ) {
+        verbose("ERROR ($$resp->{exit_code}): $resp->{merged}") ;
+    } else {
+        verbose("It worked") ;
+    }
+
+    # return 1 to show success
+    return !$resp->{exit_code} ;
 }
 
 # -----------------------------------------------------------------------------
@@ -137,29 +160,39 @@ sub _task_action
             }
         }
     } elsif ( $opt->{exec} ) {
-        # read $opt{count} items from the queue and run them individually against the exec program
-    } else {
+        my $counter = $opt->{count} ;
+        my $processing = 1 ;
 
-        # optionally ready from stdin, allowing piping to script
-        if ( $opt->{msg} eq '-' ) {
-            $opt->{msg} = "" ;
-            foreach (<STDIN>) {
-                $opt->{msg} .= $_ ;
-            }
-            # remove any final linefeed
-            chomp $opt->{msg} ;
-        }
-        # if we have a message then this should be added to the queue asap
-        if ( $opt->{msg} ) {
-            my ( $activates, $epoch ) = parse_datetime( $opt->{activates} ) ;
-            my $resp = $ec->add(
-                data      => { task => $opt->{msg} },
-                activates => $activates
+        # get next item(s) from echelon, process with the exec command
+        # while listen either forever (listen && count = 0) or counter !=0
+        while( $processing) {
+            my $handled = $ec->process(
+                count           => 1,
+                callback        => \&_exec_action,
+                callback_params => { cmd => $opt->{exec} },
             ) ;
-        } else {
-            verbose("Parameters are required, or message queue is empty") ;
-            exit 0 ;
-        }
+            if( $handled && !$opt->{listen}) {
+                $counter -= $handled ;
+                verbose( "handled, $counter left") ;
+            }
+            # determine if we should exit, listen listens forever, otherwise
+            # just do the number in the counter
+            if(  $opt->{listen} || $counter) {
+                sleep( TASK_SLEEP) ;
+            } else {
+                $processing = 0 ; ;
+            }
+        }  ;
+
+    } elsif ( $opt->{msg} ) {
+        my ( $activates, $epoch ) = parse_datetime( $opt->{activates} ) ;
+        my $resp = $ec->add(
+            data      => { task => $opt->{msg} },
+            activates => $activates
+        ) ;
+    } else {
+        verbose("Parameters are required, or message queue is empty") ;
+        exit 0 ;
     }
 }
 
@@ -195,7 +228,6 @@ sub _pubsub_action
             msg_exit("Parameters are required, or message queue is empty") ;
         }
     }
-
 }
 
 
@@ -299,7 +331,7 @@ sub echelon_connect
 my %opt = init_app(
     help_text => "Perform actions against Echelon
         use perldoc " . get_program() . " to get the setup for the " . ECHELON . " config file",
-    help_cmdline => "message to send",
+    help_cmdline => "message to send or '-' to read single message from STDIN",
     options      => {
         'verbose|v' => 'Output useful information',
         'queue|q=s' => { desc => 'queue to add things to', required => 1 },
@@ -314,11 +346,8 @@ my %opt = init_app(
         'size|s'    => 'task action: Display the number of unprocessed items in a task queue',
         'peek|p=i'  => { desc => 'task action: Display the next few items in a task queue' },
         'count|c=i' => 'Number of messages to read/process',
-        'exec|e=s'  => {
-            desc => "task action: command to run with the message, use count to limit, default "
-                . EXEC_DEFAULT,
-        },
-        'pop' => { desc => "simple action: remove an item from the queue" },
+        'exec|e=s'  => { desc => "task action: take next valid item from queue and run command", },
+        'pop'       => { desc => "simple action: remove an item from the queue" },
         'listen|l' =>
             'pubsub action: Listen for pubsub messages on the queue, use count to limit, default no limit',
         'activates|a=s' =>
@@ -328,6 +357,16 @@ my %opt = init_app(
 
 # we may not have or care about a message
 $opt{msg} = join( ' ', @ARGV ) ;
+
+# optionally ready from stdin, allowing piping to script
+if ( $opt{msg} eq '-' ) {
+    $opt{msg} = "" ;
+    foreach (<STDIN>) {
+        $opt{msg} .= $_ ;
+    }
+    # remove any final linefeed
+    chomp $opt{msg} ;
+}
 
 my $echelonq ;
 eval { $echelonq = echelon_connect( ECHELON, $opt{queue} ) ; } ;
