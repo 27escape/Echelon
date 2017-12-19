@@ -160,30 +160,29 @@ sub _task_action
             }
         }
     } elsif ( $opt->{exec} ) {
-        my $counter = $opt->{count} ;
+        my $counter = $opt->{count} // 0 ;
         my $processing = 1 ;
 
         # get next item(s) from echelon, process with the exec command
-        # while listen either forever (listen && count = 0) or counter !=0
+        # listen either forever or until counter = 0
         while( $processing) {
             my $handled = $ec->process(
                 count           => 1,
                 callback        => \&_exec_action,
                 callback_params => { cmd => $opt->{exec} },
             ) ;
-            if( $handled && !$opt->{listen}) {
-                $counter -= $handled ;
+            if( $handled ) {
+                $counter -= $handled if(!$opt->{listen});
                 verbose( "handled, $counter left") ;
             }
             # determine if we should exit, listen listens forever, otherwise
             # just do the number in the counter
-            if(  $opt->{listen} || $counter) {
+            if( $opt->{listen} || $counter) {
                 sleep( TASK_SLEEP) ;
             } else {
                 $processing = 0 ; ;
             }
         }  ;
-
     } elsif ( $opt->{msg} ) {
         my ( $activates, $epoch ) = parse_datetime( $opt->{activates} ) ;
         my $resp = $ec->add(
